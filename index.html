@@ -299,6 +299,18 @@ footer { max-width: 1280px; margin: 0 auto; padding-block: 0 32px; color: var(--
     <h1 id="h-anim">Choose the rams and ewes</h1>
     <p>Paste or upload ID lists, or pick animals from the pedigree. Every ram is paired with every ewe.</p>
   </div>
+  <section class="card" style="margin-bottom:20px" aria-labelledby="h-breeders">
+    <div class="card-head">
+      <h2 id="h-breeders">All breeders in one file</h2>
+      <div class="row">
+        <button type="button" id="btnBreeders">Choose file</button>
+        <input type="file" id="breedersFile" accept=".csv,.txt,.tsv,.xlsx,.xls" hidden>
+      </div>
+    </div>
+    <p class="muted" style="font-size:14px;max-width:70ch">A CSV or Excel file listing every ram and ewe to be mated. A Sex column (M/F, ram/ewe or sire/dam) sorts them into the two lists. Animals without one are sorted by their sex in the pedigree, or by whether they appear there as a sire or a dam.</p>
+    <label class="radio" style="min-height:32px"><input type="checkbox" id="breedersReplace" checked>Replace the current ram and ewe lists</label>
+    <div id="breedersNote" style="display:flex;flex-direction:column;gap:8px"></div>
+  </section>
   <div class="split" id="animalPanels"></div>
   <div class="calcbar">
     <div>
@@ -442,8 +454,8 @@ function toStr(v) {
 }
 function parseSex(v) {
   const s = toStr(v).toLowerCase();
-  if (/^(m|male|ram|r|wether|w|1|buck|b)$/.test(s)) return 'M';
-  if (/^(f|female|ewe|e|2|doe|d)$/.test(s)) return 'F';
+  if (/^(m|male|males|ram|rams|r|wether|w|1|buck|b|sire|sires)$/.test(s)) return 'M';
+  if (/^(f|female|females|ewe|ewes|e|2|doe|d|dam|dams)$/.test(s)) return 'F';
   return '';
 }
 function parseYear(v) {
@@ -1255,6 +1267,7 @@ function renderAnimals() {
     }
     renderPick(role);
   }
+  renderBreedersNote();
   const n = S.rams.length * S.ewes.length;
   $('calcSummary').textContent = (S.rams.length || S.ewes.length) ? `${fmtInt(S.rams.length)} ${plural(S.rams.length, 'ram')} × ${fmtInt(S.ewes.length)} ${plural(S.ewes.length, 'ewe')} = ${fmtInt(n)} possible ${plural(n, 'mating')}` : 'No rams or ewes yet';
   $('calcDetail').textContent = pr.block || (cs ? `The pedigree is trimmed to these ${fmtInt(new Set([...S.rams, ...S.ewes]).size)} animals and their ${fmtInt(cs.ancestors)} other ancestors.` : '');
@@ -1296,6 +1309,76 @@ async function readIdFile(file) {
   if (ids.length > 1 && PED && !PED.index.has(ids[0]) && PED.index.has(ids[1])) ids = ids.slice(1);
   else if (ids.length && /^(id|tag|animal|ram|ewe|sire|dam|ids)$/i.test(ids[0])) ids = ids.slice(1);
   return ids;
+}
+
+/* one file with every breeder, sorted into rams and ewes */
+let BREEDERS = null; // { name, rams, ewes, pending:[ids], fromFile, fromPed, disagree, replaced }
+async function readBreederFile(file) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase(); let rows;
+  if (ext === 'xlsx' || ext === 'xls') {
+    await loadLib('xlsx');
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: '' });
+  } else rows = parseCSV(await file.text());
+  if (!rows.length) return [];
+  const first = rows[0].map(toStrV); const low = first.map(x => x.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const idRe = /^(id|ids|animal|animalid|tag|tagid|eartag|eid|ident|sheepid|visualid|vid|lambid|registration|regno|scrapieid)$/;
+  let sexCol = low.findIndex(x => /^(sex|gender|role|type|class|category|mf)$/.test(x) || /sex|gender/.test(x));
+  let hasHeader = sexCol >= 0 || low.some(x => idRe.test(x)) ||
+    (!!PED && rows.length > 1 && !PED.index.has(first[0]) && PED.index.has(toStrV(rows[1][0])));
+  let idCol = 0;
+  if (hasHeader) { const g = low.findIndex(x => idRe.test(x)); idCol = g >= 0 ? g : (sexCol === 0 ? 1 : 0); }
+  const body = hasHeader ? rows.slice(1) : rows;
+  if (sexCol < 0 && body.length) {
+    // no header naming it: use a column whose values are nearly all sexes
+    const width = Math.max(...body.map(r => r.length));
+    for (let c = 0; c < width && sexCol < 0; c++) {
+      if (c === idCol) continue;
+      const vals = body.map(r => toStrV(r[c])).filter(Boolean);
+      if (vals.length && vals.filter(v => parseSex(v)).length / vals.length >= 0.8) sexCol = c;
+    }
+  }
+  return body.map(r => ({ id: toStrV(r[idCol]), sex: sexCol >= 0 ? parseSex(r[sexCol]) : '' })).filter(x => x.id);
+}
+function sortBreeders(list) {
+  const usedSire = new Set(), usedDam = new Set();
+  if (PED) for (let i = 0; i < PED.n; i++) { if (PED.sire[i] >= 0) usedSire.add(PED.sire[i]); if (PED.dam[i] >= 0) usedDam.add(PED.dam[i]); }
+  const out = { rams: [], ewes: [], pending: [], fromFile: 0, fromPed: 0, disagree: [] }; const seen = new Set();
+  for (const x of list) {
+    if (seen.has(x.id)) continue; seen.add(x.id);
+    const i = PED ? PED.index.get(x.id) : undefined;
+    const ps = i === undefined ? '' : (PED.sex[i] || (usedSire.has(i) && !usedDam.has(i) ? 'M' : usedDam.has(i) && !usedSire.has(i) ? 'F' : ''));
+    let sx = x.sex;
+    if (sx) { out.fromFile++; if (ps && ps !== sx) out.disagree.push(x.id); }
+    else if (ps) { sx = ps; out.fromPed++; }
+    if (sx === 'M') out.rams.push(x.id); else if (sx === 'F') out.ewes.push(x.id); else out.pending.push(x.id);
+  }
+  return out;
+}
+async function loadBreeders(file) {
+  try {
+    busy('Reading ' + file.name + '…'); await tick();
+    const list = await readBreederFile(file);
+    if (!list.length) { busy(false); toast('No animal IDs found in ' + file.name + '.'); return; }
+    const out = sortBreeders(list); const replace = $('breedersReplace').checked;
+    if (replace) S.keepUnknown = [];
+    setList('rams', out.rams, replace); setList('ewes', out.ewes, replace);
+    BREEDERS = Object.assign({ name: file.name, total: list.length, replaced: replace }, out);
+    busy(false); toast(`Sorted ${out.rams.length} rams and ${out.ewes.length} ewes from ${file.name}.`);
+  } catch (e) { busy(false); toast(e && e.message ? e.message : 'Could not read that file.'); }
+  persist(); route();
+}
+function renderBreedersNote() {
+  const box = $('breedersNote'); if (!box) return;
+  if (!BREEDERS) { box.innerHTML = ''; return; }
+  const b = BREEDERS;
+  const how = [];
+  if (b.fromFile) how.push(`${fmtInt(b.fromFile)} sorted by the file's sex column`);
+  if (b.fromPed) how.push(`${fmtInt(b.fromPed)} by the pedigree`);
+  let h = `<p style="font-size:14px"><span class="mono">${esc(b.name)}</span>: ${fmtInt(b.rams.length)} ${plural(b.rams.length, 'ram')} and ${fmtInt(b.ewes.length)} ${plural(b.ewes.length, 'ewe')} ${b.replaced ? 'now make up the lists' : 'added to the lists'}.${how.length ? ' ' + how.join(', ').replace(/^./, c => c.toUpperCase()) + '.' : ''}</p>`;
+  if (b.disagree.length) h += `<div class="issue"><div class="t">${b.disagree.length} ${plural(b.disagree.length, 'animal is', 'animals are')} recorded with the other sex in the pedigree; the file was used: <span class="mono">${b.disagree.slice(0, 12).map(esc).join(', ')}${b.disagree.length > 12 ? ', …' : ''}</span></div></div>`;
+  if (b.pending.length) h += `<div class="issue"><div class="t">${b.pending.length} ${plural(b.pending.length, 'animal has', 'animals have')} no sex in the file or the pedigree: <span class="mono">${b.pending.slice(0, 20).map(esc).join(', ')}${b.pending.length > 20 ? ', …' : ''}</span></div><div class="row"><button type="button" class="small" data-pending="rams">Add as rams</button><button type="button" class="small" data-pending="ewes">Add as ewes</button><button type="button" class="small" data-pending="skip">Leave out</button></div></div>`;
+  box.innerHTML = h;
 }
 
 async function runCalc() {
@@ -1624,6 +1707,15 @@ function wire() {
     } else if (t.dataset.pick) renderPick(t.dataset.pick);
   });
   $('animalPanels').addEventListener('input', e => { if (e.target.dataset.pick && e.target.type !== 'checkbox') renderPick(e.target.dataset.pick); });
+  $('btnBreeders').addEventListener('click', () => { if (!PED) { toast('Load a pedigree first.'); return; } $('breedersFile').click(); });
+  $('breedersFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadBreeders(f); });
+  $('breedersNote').addEventListener('click', e => {
+    const b = e.target.closest('[data-pending]'); if (!b || !BREEDERS) return;
+    const ids = BREEDERS.pending; const where = b.dataset.pending;
+    if (where !== 'skip') { setList(where, ids, false); BREEDERS[where] = BREEDERS[where].concat(ids); }
+    BREEDERS.pending = [];
+    persist(); route();
+  });
   $('btnCalc').addEventListener('click', runCalc);
   // matrix
   let thrTimer = null;
