@@ -200,6 +200,16 @@ table.data select { min-height: 34px; font-family: var(--font-mono); font-size: 
 .group .gid { font-family: var(--font-mono); font-weight: 600; font-size: 15px; }
 .group .ewes { font-family: var(--font-mono); font-size: 12.5px; color: var(--fg-2); overflow-wrap: anywhere; line-height: 1.6; }
 .exports { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.slider-labels { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); }
+input[type="range"] { width: 100%; accent-color: var(--accent); min-height: 32px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .axis { stroke: var(--line); }
+.chart .grid { stroke: var(--line-soft); }
+.chart text { fill: var(--muted); font-size: 11px; font-family: var(--font-sans); }
+.chart .pt { fill: var(--surface); stroke: var(--accent); stroke-width: 2; cursor: pointer; }
+.chart .pt.cur { fill: var(--accent); }
+.chart .ln { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0.5; }
+.weights td { padding: 5px 10px; }
 .empty { padding: 28px 20px; text-align: center; color: var(--fg-2); display: flex; flex-direction: column; gap: 12px; align-items: center; }
 
 footer { max-width: 1280px; margin: 0 auto; padding-block: 0 32px; color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 20px; justify-content: space-between; }
@@ -311,6 +321,18 @@ footer { max-width: 1280px; margin: 0 auto; padding-block: 0 32px; color: var(--
     <label class="radio" style="min-height:32px"><input type="checkbox" id="breedersReplace" checked>Replace the current ram and ewe lists</label>
     <div id="breedersNote" style="display:flex;flex-direction:column;gap:8px"></div>
   </section>
+  <section class="card" style="margin-bottom:20px" aria-labelledby="h-ebv">
+    <div class="card-head">
+      <h2 id="h-ebv">EBVs for selection <span class="muted" style="font-weight:400;font-size:14px">(optional)</span></h2>
+      <div class="row">
+        <button type="button" class="small" id="btnEbvClear" hidden>Remove</button>
+        <button type="button" id="btnEbv">Choose file</button>
+        <input type="file" id="ebvFile" accept=".csv,.txt,.tsv,.xlsx,.xls" hidden>
+      </div>
+    </div>
+    <p class="muted" style="font-size:14px;max-width:70ch">A CSV or Excel file with an animal ID column and one column per EBV or index, such as an NSIP download. On the Mating plan step it lets the plan favour rams with better EBVs while keeping inbreeding in check.</p>
+    <div id="ebvNote" style="display:flex;flex-direction:column;gap:8px"></div>
+  </section>
   <div class="split" id="animalPanels"></div>
   <div class="calcbar">
     <div>
@@ -373,7 +395,9 @@ footer { max-width: 1280px; margin: 0 auto; padding-block: 0 32px; color: var(--
           <legend>Goal</legend>
           <label class="radio"><input type="radio" name="goal" id="goalMean" value="mean" checked>Lowest average lamb F</label>
           <label class="radio"><input type="radio" name="goal" id="goalWorst" value="worst">Lowest worst-case lamb F</label>
+          <label class="radio"><input type="radio" name="goal" id="goalMerit" value="merit">Genetic merit and inbreeding (like MateSel)</label>
         </fieldset>
+        <div id="meritBox" style="display:flex;flex-direction:column;gap:12px" hidden></div>
         <div class="grid3" style="grid-template-columns:repeat(2,minmax(0,1fr))">
           <label class="field">Min ewes per ram<input type="number" id="minPer" min="0" step="1" value="0"></label>
           <label class="field">Max ewes per ram<input type="number" id="maxPer" min="0" step="1" value="40"></label>
@@ -404,6 +428,10 @@ footer { max-width: 1280px; margin: 0 auto; padding-block: 0 32px; color: var(--
     <div class="main-col">
       <div class="tiles" id="planTiles"></div>
       <div id="planIssues" style="display:flex;flex-direction:column;gap:10px"></div>
+      <section class="card" id="tradeoffCard" aria-labelledby="h-trade" hidden>
+        <div class="card-head"><h2 id="h-trade">Gain against inbreeding</h2><span class="muted" style="font-size:13px">Select a point to use that plan</span></div>
+        <div id="tradeoffBody"></div>
+      </section>
       <section class="card" aria-labelledby="h-plantab">
         <div class="card-head">
           <h2 id="h-plantab">Plan</h2>
@@ -685,6 +713,7 @@ function trimmedPed(ped, ids) {
 /* Inbreeding of every animal: F_i = sum_j L_ij^2 D_j - 1, walking each animal's ancestors youngest-first. */
 function inbreeding(s, d, n) {
   const F = new Float64Array(n), D = new Float64Array(n), L = new Float64Array(n);
+  for (let i = 0; i < n; i++) if (s[i] >= i || d[i] >= i) throw new Error('The pedigree has a loop (an animal is its own ancestor). Fix it on the Pedigree step first.');
   const heap = new Int32Array(n), inHeap = new Uint8Array(n);
   let hs = 0;
   const push = j => {
@@ -737,6 +766,22 @@ function colleauColumn(s, d, D, n, r, q, a) {
   return a;
 }
 
+/* A x for any vector x (same two passes as one column). */
+function colleauVector(s, d, D, n, x, q, a) {
+  q.set(x);
+  for (let j = n - 1; j >= 0; j--) {
+    const v = q[j];
+    if (v !== 0) { if (s[j] >= 0) q[s[j]] += 0.5 * v; if (d[j] >= 0) q[d[j]] += 0.5 * v; }
+  }
+  for (let j = 0; j < n; j++) {
+    let v = D[j] * q[j];
+    if (s[j] >= 0) v += 0.5 * a[s[j]];
+    if (d[j] >= 0) v += 0.5 * a[d[j]];
+    a[j] = v;
+  }
+  return a;
+}
+
 function candidateStats(ped, ids) {
   const T = trimmedPed(ped, ids);
   const { F } = inbreeding(T.s, T.d, T.n);
@@ -756,14 +801,22 @@ function calcMatrix(ped, rams, ewes) {
   const { F, D } = inbreeding(T.s, T.d, T.n);
   const R = rams.length, E = ewes.length, M = new Float64Array(E * R);
   const q = new Float64Array(T.n), a = new Float64Array(T.n);
-  const ePos = ewes.map(id => T.pos.get(id));
+  const ePos = ewes.map(id => T.pos.get(id)), rPos = rams.map(id => T.pos.get(id));
+  const ARR = new Float64Array(R * R), sRE = new Float64Array(R);
   rams.forEach((id, r) => {
-    colleauColumn(T.s, T.d, D, T.n, T.pos.get(id), q, a);
-    for (let e = 0; e < E; e++) M[e * R + r] = 0.5 * a[ePos[e]];
+    colleauColumn(T.s, T.d, D, T.n, rPos[r], q, a);
+    let s = 0;
+    for (let e = 0; e < E; e++) { M[e * R + r] = 0.5 * a[ePos[e]]; s += a[ePos[e]]; }
+    sRE[r] = s;
+    for (let k = 0; k < R; k++) ARR[r * R + k] = a[rPos[k]];
   });
+  // sum of relationships among all ewes: one pass with the ewe indicator vector
+  const x = new Float64Array(T.n); for (const p of ePos) x[p] = 1;
+  colleauVector(T.s, T.d, D, T.n, x, q, a);
+  let SEE = 0; for (const p of ePos) SEE += a[p];
   const own = new Map([...rams, ...ewes].map(id => [id, F[T.pos.get(id)]]));
   const ms = (typeof performance !== 'undefined' ? performance : Date).now() - t0;
-  return { rams: rams.slice(), ewes: ewes.slice(), M, T, F, own, ms };
+  return { rams: rams.slice(), ewes: ewes.slice(), M, T, F, own, ms, ARR, sRE, SEE };
 }
 
 /* Wright's paths for one pair: common ancestors, and how much each path adds. */
@@ -845,6 +898,28 @@ function flowAssign(cand, R, E, M, ok, capMin, capMax) {
 }
 
 function solvePlan(res, st) {
+  const P = planSetup(res, st);
+  const { R, E, M, allowed, cand, capMin, capMax, assign, locked, unplaced, issues, minR, maxR } = P;
+  const run = limit => flowAssign(cand, R, E, M, (i, j) => allowed(i, j) && M[i * R + j] <= limit, capMin, capMax);
+  let out = run(Infinity); let worstLimit = null;
+  if (st.goal === 'worst' && out.flow > 0) {
+    const vals = new Set();
+    for (const i of cand) for (let j = 0; j < R; j++) if (allowed(i, j)) vals.add(M[i * R + j]);
+    const v = [...vals].sort((a, b) => a - b);
+    let lo = 0, hi = v.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (run(v[mid] + 1e-12).flow === out.flow) hi = mid; else lo = mid + 1; }
+    worstLimit = v[lo]; out = run(v[lo] + 1e-12);
+  }
+  out.match.forEach((j, k) => { const i = cand[k]; if (j >= 0) assign[i] = j; else unplaced.push({ e: i, reason: 'room' }); });
+  return finishPlan(P, { worstLimit });
+}
+function finishPlan(P, extra) {
+  const { R, E, assign, locked, unplaced, issues, minR, maxR } = P;
+  const counts = new Int32Array(R); for (let i = 0; i < E; i++) if (assign[i] >= 0) counts[assign[i]]++;
+  const unmetMin = []; for (let j = 0; j < R; j++) if (counts[j] < minR[j]) unmetMin.push({ r: j, have: counts[j], min: minR[j] });
+  return Object.assign({ assign, locked, manual: new Uint8Array(E), unplaced, issues, unmetMin, minR, maxR, worstLimit: null }, extra || {});
+}
+function planSetup(res, st) {
   const R = res.rams.length, E = res.ewes.length, M = res.M; const ceil = st.ceiling / 100 + 1e-12;
   const rIdx = new Map(res.rams.map((id, i) => [id, i])), eIdx = new Map(res.ewes.map((id, i) => [id, i]));
   const forb = new Set();
@@ -872,20 +947,131 @@ function solvePlan(res, st) {
   if (room < cand.length) issues.push({ type: 'capacity', room, need: cand.length, suggest: Math.ceil(E / Math.max(1, R)) });
   const sumMin = capMin.reduce((a, b) => a + b, 0);
   if (sumMin > cand.length) issues.push({ type: 'mins', sumMin, have: cand.length });
-  const run = limit => flowAssign(cand, R, E, M, (i, j) => allowed(i, j) && M[i * R + j] <= limit, capMin, capMax);
-  let out = run(Infinity); let worstLimit = null;
-  if (st.goal === 'worst' && out.flow > 0) {
-    const vals = new Set();
-    for (const i of cand) for (let j = 0; j < R; j++) if (allowed(i, j)) vals.add(M[i * R + j]);
-    const v = [...vals].sort((a, b) => a - b);
-    let lo = 0, hi = v.length - 1;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (run(v[mid] + 1e-12).flow === out.flow) hi = mid; else lo = mid + 1; }
-    worstLimit = v[lo]; out = run(v[lo] + 1e-12);
+  return { R, E, M, allowed, cand, capMin, capMax, assign, locked, unplaced, issues, minR, maxR };
+}
+
+/* ===== Selection on an index with inbreeding control (MateSel-style) =====
+   Every listed ewe is bred; the plan decides how many ewes each ram gets and which.
+   Lamb index  G = mean over lambs of (I_ram + I_ewe) / 2
+   Lamb F      L = mean over lambs of F (half the ram-ewe relationship)
+   Relatedness C = average coancestry among the lambs = (n'A_RR n + 2 n's + S_EE) / (8 E^2),
+                   n = ewes per ram, s = each ram's summed relationship to the ewes.
+   For a balance setting the plan minimises  -wG*G + wD*(C + L). */
+function flowGeneral(cand, R, ok, edgeCost, unitCost, capMin, capMax, startLoad) {
+  const C = cand.length; const N = C + R + 2, S0 = C + R, T0 = C + R + 1;
+  const slots = capMax.map(c => Math.min(Math.max(0, c), C));
+  const ec0 = []; let maxAbs = 0;
+  for (let k = 0; k < C; k++) for (let j = 0; j < R; j++) if (ok(cand[k], j)) { const c = edgeCost(cand[k], j); ec0.push([k, j, c]); maxAbs = Math.max(maxAbs, Math.abs(c)); }
+  const uc0 = [];
+  for (let j = 0; j < R; j++) { const row = []; for (let u = 0; u < slots[j]; u++) { const c = unitCost(j, (startLoad ? startLoad[j] : 0) + u); row.push(c); maxAbs = Math.max(maxAbs, Math.abs(c)); } uc0.push(row); }
+  const scale = maxAbs > 0 ? 1e9 / maxAbs : 1; const BIG = 1e14;
+  const nE = 2 * (C + ec0.length + slots.reduce((a, b) => a + b, 0)) + 4;
+  const to = new Int32Array(nE), cap = new Int32Array(nE), cost = new Float64Array(nE), nxt = new Int32Array(nE), head = new Int32Array(N).fill(-1);
+  let ec = 0;
+  const add = (u, v, c, w) => { to[ec] = v; cap[ec] = c; cost[ec] = w; nxt[ec] = head[u]; head[u] = ec++; to[ec] = u; cap[ec] = 0; cost[ec] = -w; nxt[ec] = head[v]; head[v] = ec++; };
+  for (let k = 0; k < C; k++) add(S0, k, 1, 0);
+  for (const [k, j, c] of ec0) add(k, C + j, 1, Math.round(c * scale));
+  for (let j = 0; j < R; j++) { const mn = Math.min(Math.max(0, capMin[j]), slots[j]); uc0[j].forEach((c, u) => add(C + j, T0, 1, Math.round(c * scale) + (u < mn ? -BIG : 0))); }
+  const dist = new Float64Array(N), inq = new Uint8Array(N), pe = new Int32Array(N), Q = new Int32Array(N + 1);
+  for (;;) {
+    dist.fill(Infinity); dist[S0] = 0; let qh = 0, qt = 0; Q[qt++] = S0; inq[S0] = 1;
+    while (qh !== qt) {
+      const u = Q[qh]; qh = (qh + 1) % (N + 1); inq[u] = 0;
+      for (let e = head[u]; e >= 0; e = nxt[e]) {
+        if (cap[e] > 0) { const v = to[e], nd = dist[u] + cost[e]; if (nd < dist[v]) { dist[v] = nd; pe[v] = e; if (!inq[v]) { inq[v] = 1; Q[qt] = v; qt = (qt + 1) % (N + 1); } } }
+      }
+    }
+    if (dist[T0] === Infinity) break;
+    for (let v = T0; v !== S0; v = to[pe[v] ^ 1]) { cap[pe[v]]--; cap[pe[v] ^ 1]++; }
   }
-  out.match.forEach((j, k) => { const i = cand[k]; if (j >= 0) assign[i] = j; else unplaced.push({ e: i, reason: 'room' }); });
-  const counts = new Int32Array(R); for (let i = 0; i < E; i++) if (assign[i] >= 0) counts[assign[i]]++;
-  const unmetMin = []; for (let j = 0; j < R; j++) if (counts[j] < minR[j]) unmetMin.push({ r: j, have: counts[j], min: minR[j] });
-  return { assign, locked, manual: new Uint8Array(E), unplaced, issues, unmetMin, minR, maxR, worstLimit };
+  const match = new Int32Array(C).fill(-1);
+  for (let k = 0; k < C; k++) for (let e = head[k]; e >= 0; e = nxt[e]) if ((e & 1) === 0 && to[e] >= C && to[e] < C + R && cap[e] === 0) match[k] = to[e] - C;
+  return match;
+}
+function meritMeasures(res, assign, Iram, Iewe) {
+  const R = res.rams.length, E = res.ewes.length, M = res.M, A = res.ARR;
+  const n = new Float64Array(R); let P = 0, g = 0, l = 0;
+  for (let i = 0; i < E; i++) { const j = assign[i]; if (j < 0) continue; n[j]++; P++; g += 0.5 * (Iram[j] + Iewe[i]); l += M[i * R + j]; }
+  let q = 0; for (let j = 0; j < R; j++) { if (!n[j]) continue; for (let k = 0; k < R; k++) q += n[j] * n[k] * A[j * R + k]; q += 2 * n[j] * res.sRE[j]; }
+  const C = (q + res.SEE) / (8 * E * E);
+  return { G: P ? g / P : 0, L: P ? l / P : 0, C, placed: P, counts: n };
+}
+function meritSolve(res, st, Iram, Iewe, wG, wD) {
+  const P = planSetup(res, st);
+  const { R, E, M, allowed, cand, capMin, capMax, assign, locked, unplaced } = P;
+  const A = res.ARR, sRE = res.sRE, K = 1 / (8 * E * E);
+  const nPlaced = Math.max(1, cand.length + [...locked].reduce((a, b) => a + b, 0));
+  const lockedN = new Float64Array(R); for (let i = 0; i < E; i++) if (locked[i]) lockedN[assign[i]]++;
+  const objective = asg => { const m = meritMeasures(res, asg, Iram, Iewe); return -wG * m.G + wD * (m.C + m.L); };
+  // start from an even spread, then re-solve with the relatedness cost linearised at the current ram use
+  let nhat = new Float64Array(R); for (let j = 0; j < R; j++) nhat[j] = lockedN[j] + cand.length / R;
+  let best = null, bestObj = Infinity;
+  for (let it = 0; it < 4; it++) {
+    const gvec = new Float64Array(R); for (let j = 0; j < R; j++) { let s = 0; for (let k = 0; k < R; k++) if (k !== j) s += A[j * R + k] * nhat[k]; gvec[j] = s; }
+    const match = flowGeneral(cand, R, allowed,
+      (i, j) => (-wG * 0.5 * Iram[j] + wD * M[i * R + j]) / nPlaced,
+      (j, cnt) => wD * K * ((2 * cnt + 1) * A[j * R + j] + 2 * gvec[j] + 2 * sRE[j]),
+      capMin, capMax, lockedN);
+    const asg = assign.slice(); match.forEach((j, k) => { asg[cand[k]] = j; });
+    const o = objective(asg);
+    if (o < bestObj) { bestObj = o; best = asg; }
+    const n = new Float64Array(R); for (let i = 0; i < E; i++) if (asg[i] >= 0) n[asg[i]]++;
+    for (let j = 0; j < R; j++) nhat[j] = it === 0 ? n[j] : 0.5 * (nhat[j] + n[j]);
+  }
+  // local search: move single ewes between rams while the objective improves
+  const asg = best; const n = new Float64Array(R); for (let i = 0; i < E; i++) if (asg[i] >= 0) n[asg[i]]++;
+  const gv = new Float64Array(R); for (let j = 0; j < R; j++) { let s = 0; for (let k = 0; k < R; k++) s += A[j * R + k] * n[k]; gv[j] = s; }
+  const maxR = capMax.map((c, j) => c + lockedN[j]), minR = P.minR;
+  for (let pass = 0; pass < 25; pass++) {
+    let moved = 0;
+    for (const i of cand) {
+      const a = asg[i]; if (a < 0) continue;
+      let bestB = -1, bestD = -1e-15;
+      for (let b = 0; b < R; b++) {
+        if (b === a || n[b] + 1 > maxR[b] || n[a] - 1 < minR[a] || !allowed(i, b)) continue;
+        const dG = 0.5 * (Iram[b] - Iram[a]) / nPlaced;
+        const dL = (M[i * R + b] - M[i * R + a]) / nPlaced;
+        const dC = K * (2 * (gv[b] - gv[a]) + A[a * R + a] + A[b * R + b] - 2 * A[a * R + b] + 2 * (sRE[b] - sRE[a]));
+        const d = -wG * dG + wD * (dC + dL);
+        if (d < bestD) { bestD = d; bestB = b; }
+      }
+      if (bestB >= 0) {
+        const b = bestB; asg[i] = b; n[a]--; n[b]++;
+        for (let k = 0; k < R; k++) gv[k] += A[k * R + b] - A[k * R + a];
+        moved++;
+      }
+    }
+    if (!moved) break;
+  }
+  // with the number of ewes per ram fixed, pair them for the lowest lamb F
+  const fixed = Array.from(n, (c, j) => c - lockedN[j]);
+  const match = flowAssign(cand.filter(i => asg[i] >= 0), R, E, M, allowed, fixed, fixed);
+  const placedCand = cand.filter(i => asg[i] >= 0);
+  const final = assign.slice(); placedCand.forEach((i, k) => { final[i] = match[k] >= 0 ? match[k] : asg[i]; });
+  cand.forEach(i => { if (final[i] < 0) unplaced.push({ e: i, reason: 'room' }); });
+  P.assign = final;
+  const out = finishPlan(P, {});
+  out.merit = meritMeasures(res, final, Iram, Iewe);
+  return out;
+}
+/* Solve a row of balance settings from "most gain" (t=0) to "least inbreeding" (t=1). */
+function meritFrontier(res, st, Iram, Iewe, steps, onStep) {
+  steps = steps || 10;
+  let lo = Infinity, hi = -Infinity; for (const v of Iram) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  const spread = hi > lo ? hi - lo : 1;
+  const top = meritSolve(res, st, Iram, Iewe, 1 / spread, 1e-4);
+  const div = meritSolve(res, st, Iram, Iewe, 1e-4 / spread, 1);
+  const dG = Math.max(1e-9, top.merit.G - div.merit.G), dD = Math.max(1e-9, (top.merit.C + top.merit.L) - (div.merit.C + div.merit.L));
+  const pts = [];
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps;
+    let plan;
+    if (s === 0) plan = top; else if (s === steps) plan = div;
+    else plan = meritSolve(res, st, Iram, Iewe, (1 - t) / dG, t / dD);
+    pts.push({ t, plan });
+    if (onStep) onStep(s, steps);
+  }
+  return pts;
 }
 
 function planStats(res, assign) {
@@ -915,7 +1101,7 @@ function selfTest() {
   return { results, pass: results.every(r => r.pass) };
 }
 
-if (typeof module !== 'undefined') module.exports = { SAMPLE_PEDIGREE, SAMPLE_RAMS, SAMPLE_EWES, parseCSV, guessMap, buildPedigree, trimmedPed, inbreeding, colleauColumn, calcMatrix, pairPaths, solvePlan, planStats, selfTest, candidateStats };
+if (typeof module !== 'undefined') module.exports = { meritSolve, meritFrontier, meritMeasures, colleauVector, SAMPLE_PEDIGREE, SAMPLE_RAMS, SAMPLE_EWES, parseCSV, guessMap, buildPedigree, trimmedPed, inbreeding, colleauColumn, calcMatrix, pairPaths, solvePlan, planStats, selfTest, candidateStats };
 </script>
 <script>
 /* ===== Inbreeding Calculator: interface ===== */
@@ -928,7 +1114,7 @@ const LIB = {
   autotable: 'https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js'
 };
 const STORE_KEY = 'inbreeding-calculator:v1';
-const DEFAULT_RULES = { goal: 'mean', minPer: 0, maxPer: 40, ceiling: 13 };
+const DEFAULT_RULES = { goal: 'mean', minPer: 0, maxPer: 40, ceiling: 13, balance: 5 };
 const VIEWS = ['pedigree', 'animals', 'matrix', 'plan'];
 
 const $ = id => document.getElementById(id);
@@ -943,7 +1129,7 @@ const toStrV = v => (v == null ? '' : (v instanceof Date ? (isNaN(v) ? '' : v.to
 /* ---------- state ---------- */
 const S = {
   src: null, map: { id: -1, sire: -1, dam: -1, sex: -1, birth: -1 }, unknownText: '0, NA, blank',
-  fixes: { clear: [], keepRow: {} }, rams: [], ewes: [], keepUnknown: [], threshold: 13,
+  fixes: { clear: [], keepRow: {} }, rams: [], ewes: [], keepUnknown: [], threshold: 13, ebv: null, index: { mode: 'w', col: '', weights: {} },
   rules: Object.assign({ perRam: {}, locked: [], forbidden: [] }, DEFAULT_RULES), calcDone: false, planSaved: null
 };
 let PED = null, CHECK = null, RES = null, PLAN = null, CAND = null, CANDKEY = '', SEL = null, WB = null;
@@ -1020,7 +1206,7 @@ function snapshot() {
     app: 'inbreeding-calculator', version: 1, savedAt: new Date().toISOString(),
     src: S.src ? { name: S.src.name, sample: !!S.src.sample, sheet: S.src.sheet || null, table: S.src.table } : null,
     map: S.map, unknownText: S.unknownText, fixes: S.fixes, rams: S.rams, ewes: S.ewes, keepUnknown: S.keepUnknown,
-    threshold: S.threshold, rules: S.rules, calcDone: !!RES, plan: serializePlan()
+    threshold: S.threshold, rules: S.rules, ebv: S.ebv, index: S.index, calcDone: !!RES, plan: serializePlan()
   };
 }
 function persist() {
@@ -1040,6 +1226,7 @@ function restore(obj) {
   S.fixes = obj.fixes || { clear: [], keepRow: {} }; S.rams = obj.rams || []; S.ewes = obj.ewes || []; S.keepUnknown = obj.keepUnknown || [];
   S.threshold = obj.threshold != null ? obj.threshold : 13;
   S.rules = Object.assign({ perRam: {}, locked: [], forbidden: [] }, DEFAULT_RULES, obj.rules || {});
+  S.ebv = obj.ebv || null; S.index = obj.index || { mode: 'w', col: '', weights: {} }; FRONTIER = null;
   rebuild(false);
   if (obj.calcDone && PED && !CHECK.errors.length && candidateProblems().block === '') {
     RES = calcMatrix(PED, S.rams, S.ewes);
@@ -1053,10 +1240,16 @@ function setTable(name, rows, opts) {
   opts = opts || {};
   if (!rows || rows.length < 2) { toast('That file has no data rows.'); return; }
   const width = Math.max(...rows.map(r => r.length));
-  const headers = Array.from({ length: width }, (_, i) => toStrV(rows[0][i]) || 'Column ' + (i + 1));
-  const body = rows.slice(1).map(r => Array.from({ length: width }, (_, i) => r[i] instanceof Date ? r[i].toISOString().slice(0, 10) : (r[i] == null ? '' : r[i])));
-  S.src = { name, sample: !!opts.sample, sheet: opts.sheet || null, sheets: opts.sheets || [], table: { headers, rows: body } };
-  S.map = guessMap(headers);
+  // a file without a header row starts straight in with an animal
+  const hasHeader = rows[0].some(v => /id|tag|sire|dam|sex|gender|birth|born|dob|year|animal|father|mother|ram|ewe|parent|name/i.test(toStrV(v)));
+  const headers = Array.from({ length: width }, (_, i) => (hasHeader && toStrV(rows[0][i])) || 'Column ' + (i + 1));
+  const body = (hasHeader ? rows.slice(1) : rows).map(r => Array.from({ length: width }, (_, i) => r[i] instanceof Date ? r[i].toISOString().slice(0, 10) : (r[i] == null ? '' : r[i])));
+  S.src = { name, sample: !!opts.sample, sheet: opts.sheet || null, sheets: opts.sheets || [], table: { headers, rows: body }, noHeader: !hasHeader };
+  if (hasHeader) S.map = guessMap(headers);
+  else {
+    const sexCol = headers.findIndex((_, c) => c > 2 && body.length && body.filter(r => parseSex(r[c])).length / body.length >= 0.8);
+    S.map = { id: 0, sire: width > 1 ? 1 : -1, dam: width > 2 ? 2 : -1, sex: sexCol, birth: -1 };
+  }
   S.fixes = { clear: [], keepRow: {} };
   rebuild(true);
 }
@@ -1068,7 +1261,7 @@ function rebuild(clearResults) {
   CAND = null; CANDKEY = '';
   if (clearResults !== false) invalidate();
 }
-function invalidate() { RES = null; PLAN = null; SEL = null; S.calcDone = false; S.planSaved = null; }
+function invalidate() { FRONTIER = null; RES = null; PLAN = null; SEL = null; S.calcDone = false; S.planSaved = null; }
 
 async function loadPedigreeFile(file) {
   if (!file) return;
@@ -1096,6 +1289,13 @@ function loadSample() {
   setTable('example_flock.csv', SAMPLE_PEDIGREE.map(r => r.slice()), { sample: true });
   S.rams = SAMPLE_RAMS.slice(); S.ewes = SAMPLE_EWES.slice(); S.keepUnknown = [];
   S.rules = Object.assign({ perRam: {}, locked: [], forbidden: [] }, DEFAULT_RULES); S.threshold = 13;
+  // example EBVs so the selection goal can be tried straight away
+  S.ebv = { name: 'example_ebvs.csv', cols: ['WWT', 'PWWT', 'NLW', 'YFD'], vals: {
+    R301: [1.8, 2.9, 4, -0.2], R302: [0.4, 0.9, 9, 0.3], R303: [2.6, 4.1, -2, 0.1], R304: [-0.3, -0.2, 6, -0.4], R305: [1.1, 1.6, 3, 0.0],
+    E401: [0.6, 1.0, 2, 0.1], E402: [-0.4, -0.5, 5, -0.2], E403: [1.2, 1.9, -1, 0.3], E404: [0.1, 0.3, 3, -0.1],
+    E405: [0.9, 1.5, 1, 0.0], E406: [-0.2, -0.1, 7, 0.2], E407: [1.5, 2.2, 0, -0.3], E408: [0.7, 1.2, 4, 0.1] } };
+  S.index = { mode: 'w', col: '', weights: { WWT: 1, NLW: 0.2 } };
+  FRONTIER = null;
   RES = calcMatrix(PED, S.rams, S.ewes); PLAN = solvePlan(RES, S.rules); SEL = null;
 }
 
@@ -1112,7 +1312,7 @@ function optionList(headers, selected, allowNone) {
 function renderPedigree() {
   const src = S.src;
   $('fileName').textContent = src ? src.name : 'No file yet';
-  $('fileMeta').textContent = src ? `${fmtInt(src.table.rows.length)} rows${src.sheet ? ' · sheet “' + src.sheet + '”' : ''}${src.sample ? ' · example data, replace it with your own file' : ''} · drop a new file to replace` : 'Drop a CSV or XLSX here, or choose one.';
+  $('fileMeta').textContent = src ? `${fmtInt(src.table.rows.length)} rows${src.sheet ? ' · sheet “' + src.sheet + '”' : ''}${src.noHeader ? ' · no header row, columns read as ID, sire, dam' : ''}${src.sample ? ' · example data, replace it with your own file' : ''} · drop a new file to replace` : 'Drop a CSV or XLSX here, or choose one.';
   const sheets = (src && src.sheets) || [];
   $('sheetWrap').hidden = !(WB && sheets.length > 1);
   if (WB && sheets.length > 1) $('sheetSel').innerHTML = sheets.map(n => `<option${n === src.sheet ? ' selected' : ''}>${esc(n)}</option>`).join('');
@@ -1230,7 +1430,12 @@ function removeFromList(role, ids) { const drop = new Set(ids); S[role] = S[role
 function candStats() {
   if (!PED) return null;
   const key = S.rams.join('\u0001') + '\u0002' + S.ewes.join('\u0001');
-  if (key !== CANDKEY) { CAND = (S.rams.length || S.ewes.length) ? candidateStats(PED, [...new Set([...S.rams, ...S.ewes])]) : { stats: new Map(), ancestors: 0 }; CANDKEY = key; }
+  if (CHECK.errors.length) return null;
+  if (key !== CANDKEY) {
+    try { CAND = (S.rams.length || S.ewes.length) ? candidateStats(PED, [...new Set([...S.rams, ...S.ewes])]) : { stats: new Map(), ancestors: 0 }; }
+    catch (e) { CAND = null; }
+    CANDKEY = key;
+  }
   return CAND;
 }
 function candidateProblems() {
@@ -1267,7 +1472,7 @@ function renderAnimals() {
     }
     renderPick(role);
   }
-  renderBreedersNote();
+  renderBreedersNote(); renderEbvNote();
   const n = S.rams.length * S.ewes.length;
   $('calcSummary').textContent = (S.rams.length || S.ewes.length) ? `${fmtInt(S.rams.length)} ${plural(S.rams.length, 'ram')} × ${fmtInt(S.ewes.length)} ${plural(S.ewes.length, 'ewe')} = ${fmtInt(n)} possible ${plural(n, 'mating')}` : 'No rams or ewes yet';
   $('calcDetail').textContent = pr.block || (cs ? `The pedigree is trimmed to these ${fmtInt(new Set([...S.rams, ...S.ewes]).size)} animals and their ${fmtInt(cs.ancestors)} other ancestors.` : '');
@@ -1386,7 +1591,7 @@ async function runCalc() {
   try {
     RES = calcMatrix(PED, S.rams, S.ewes);
     readRules();
-    PLAN = solvePlan(RES, S.rules); rulesDirty = false; SEL = null;
+    await solveCurrent(); SEL = null;
     toast(`Calculated ${fmtInt(RES.M.length)} pairings in ${RES.ms < 1000 ? Math.max(1, Math.round(RES.ms)) + ' ms' : (RES.ms / 1000).toFixed(1) + ' s'}.`);
   } catch (e) { toast('The calculation failed: ' + (e && e.message ? e.message : 'unknown error')); RES = null; PLAN = null; }
   busy(false); persist(); go('matrix');
@@ -1463,20 +1668,135 @@ function renderPair() {
   box.innerHTML = h;
 }
 
+function markDirty() { rulesDirty = true; FRONTIER = null; }
+/* ---------- EBVs and selection index ---------- */
+let FRONTIER = null; // balance points from the last merit solve: [{ t, plan }]
+let EBVNORM = null, EBVNORM_SRC = null;
+const normId = id => String(id).trim().toUpperCase().replace(/^0+(?=.)/, '');
+function ebvRow(id) {
+  if (!S.ebv) return null;
+  const v = S.ebv.vals[id]; if (v) return v;
+  if (EBVNORM_SRC !== S.ebv) {
+    EBVNORM = new Map(); const dup = new Set();
+    for (const k of Object.keys(S.ebv.vals)) { const n = normId(k); if (EBVNORM.has(n)) dup.add(n); else EBVNORM.set(n, S.ebv.vals[k]); }
+    dup.forEach(n => EBVNORM.delete(n)); EBVNORM_SRC = S.ebv;
+  }
+  return EBVNORM.get(normId(id)) || null;
+}
+async function loadEbvFile(file) {
+  try {
+    busy('Reading ' + file.name + '…'); await tick();
+    const ext = (file.name.split('.').pop() || '').toLowerCase(); let rows;
+    if (ext === 'xlsx' || ext === 'xls') {
+      await loadLib('xlsx');
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
+    } else rows = parseCSV(await file.text());
+    if (!rows || rows.length < 2) throw new Error('That file has no data rows.');
+    const head = rows[0].map(toStrV); const low = head.map(x => x.toLowerCase().replace(/[^a-z0-9]/g, ''));
+    let idCol = low.findIndex(x => /^(id|ids|animal|animalid|tag|tagid|eartag|eid|lambid|ident|sheepid|visualid|vid|registration|regno|lpn|lpnid|scrapieid|flockbookid)$/.test(x));
+    if (idCol < 0) idCol = 0;
+    const body = rows.slice(1); const cols = [];
+    head.forEach((h, c) => {
+      if (c === idCol) return;
+      const vals = body.map(r => toStrV(r[c])).filter(Boolean);
+      if (vals.length && vals.filter(v => isFinite(Number(v))).length / vals.length >= 0.6) cols.push(c);
+    });
+    if (!cols.length) throw new Error('No number columns were found next to the ID column.');
+    const vals = {};
+    for (const r of body) { const id = toStrV(r[idCol]); if (!id) continue; vals[id] = cols.map(c => { const v = toStrV(r[c]); return v !== '' && isFinite(Number(v)) ? Number(v) : null; }); }
+    S.ebv = { name: file.name, cols: cols.map(c => head[c] || 'Column ' + (c + 1)), vals };
+    const ix = S.ebv.cols.findIndex(n => /index/i.test(n));
+    S.index = ix >= 0 ? { mode: 'col', col: S.ebv.cols[ix], weights: {} } : { mode: 'w', col: '', weights: { [S.ebv.cols[0]]: 1 } };
+    FRONTIER = null; if (S.rules.goal === 'merit') markDirty();
+    busy(false); toast(`Read ${S.ebv.cols.length} EBV ${plural(S.ebv.cols.length, 'column')} for ${fmtInt(Object.keys(vals).length)} animals.`);
+  } catch (e) { busy(false); toast(e && e.message ? e.message : 'Could not read that file.'); }
+  persist(); route();
+}
+function renderEbvNote() {
+  const box = $('ebvNote'); $('btnEbvClear').hidden = !S.ebv;
+  if (!S.ebv) { box.innerHTML = ''; return; }
+  const n = Object.keys(S.ebv.vals).length;
+  const missR = S.rams.filter(id => !ebvRow(id)), missE = S.ewes.filter(id => !ebvRow(id));
+  let h = `<p style="font-size:14px"><span class="mono">${esc(S.ebv.name)}</span>: ${fmtInt(n)} animals, ${S.ebv.cols.length} ${plural(S.ebv.cols.length, 'column')} (${S.ebv.cols.slice(0, 8).map(esc).join(', ')}${S.ebv.cols.length > 8 ? ', …' : ''}). EBVs found for ${S.rams.length - missR.length} of ${S.rams.length} rams and ${S.ewes.length - missE.length} of ${S.ewes.length} ewes.</p>`;
+  if (missR.length) h += `<div class="issue"><div class="t">No EBVs for ${missR.length} ${plural(missR.length, 'ram')}: <span class="mono">${missR.slice(0, 12).map(esc).join(', ')}${missR.length > 12 ? ', …' : ''}</span>. ${missR.length === 1 ? 'It is' : 'They are'} given the average of the other animals.</div></div>`;
+  box.innerHTML = h;
+}
+function indexes() {
+  const ids = RES.rams.concat(RES.ewes); const cols = S.ebv ? S.ebv.cols : [];
+  const ix = S.index || { mode: 'w', weights: {} };
+  const w = cols.map(c => ix.mode === 'col' ? (c === ix.col ? 1 : 0) : (Number((ix.weights || {})[c]) || 0));
+  const rows = ids.map(ebvRow);
+  const means = cols.map((c, k) => { if (!w[k]) return 0; let s = 0, n = 0; for (const r of rows) if (r && r[k] != null) { s += r[k]; n++; } return n ? s / n : 0; });
+  let missing = 0; const vals = new Float64Array(ids.length);
+  rows.forEach((r, i) => { let v = 0, miss = false; w.forEach((wk, k) => { if (!wk) return; let x = r ? r[k] : null; if (x == null) { miss = true; x = means[k]; } v += wk * x; }); if (miss) missing++; vals[i] = v; });
+  const R = RES.rams.length;
+  return { Iram: vals.slice(0, R), Iewe: vals.slice(R), missing, active: w.some(x => x !== 0) };
+}
+function indexLabel() {
+  if (!S.ebv || !S.index) return 'Index';
+  if (S.index.mode === 'col') return S.index.col;
+  const parts = S.ebv.cols.filter(c => Number(S.index.weights[c])).map(c => `${S.index.weights[c]} × ${c}`);
+  return parts.length ? parts.join(' + ') : 'Index (no weights set)';
+}
+const fmtIdx = v => { const a = Math.abs(v); const s = a >= 100 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : v.toFixed(2); return s === '-0.00' ? '0.00' : s; };
+const signed = v => (v >= 0 ? '+' : '−') + fmtIdx(Math.abs(v));
+function clonePlan(p) {
+  return Object.assign({}, p, { assign: p.assign.slice(), locked: p.locked.slice(), manual: new Uint8Array(p.assign.length), unplaced: p.unplaced.slice(), issues: p.issues.slice(), unmetMin: p.unmetMin.slice() });
+}
+function renderMeritBox() {
+  const box = $('meritBox'); const on = S.rules.goal === 'merit'; box.hidden = !on;
+  if (!on) return;
+  if (!S.ebv) { box.innerHTML = '<div class="issue"><div class="t">Load an EBV file on the Rams &amp; ewes step to use this goal.</div><div class="row"><button type="button" class="small" data-planact="toebv">Go to Rams &amp; ewes</button></div></div>'; return; }
+  const ix = S.index;
+  const cov = c => { const k = S.ebv.cols.indexOf(c); return RES.rams.filter(id => { const r = ebvRow(id); return r && r[k] != null; }).length; };
+  let h = `<label class="field">Selection goal<select id="indexSel"><option value="w"${ix.mode === 'w' ? ' selected' : ''}>Weighted EBVs (build an index)</option>${S.ebv.cols.map(c => `<option value="col:${esc(c)}"${ix.mode === 'col' && ix.col === c ? ' selected' : ''}>Use column: ${esc(c)}</option>`).join('')}</select></label>`;
+  if (ix.mode === 'w') h += `<div class="tablebox" style="max-height:260px"><table class="data weights"><thead><tr><th>EBV</th><th>Weight</th><th>Rams with it</th></tr></thead><tbody>${S.ebv.cols.map(c => `<tr><td>${esc(c)}</td><td><input type="number" step="any" data-weight="${esc(c)}" value="${ix.weights[c] != null ? esc(ix.weights[c]) : ''}" placeholder="0" style="width:90px;min-height:34px" aria-label="Weight for ${esc(c)}"></td><td class="num">${cov(c)} / ${RES.rams.length}</td></tr>`).join('')}</tbody></table></div><p class="muted" style="font-size:13px">Weight per unit of EBV: positive to raise the trait, negative to lower it, blank to leave it out.</p>`;
+  h += `<div style="display:flex;flex-direction:column;gap:2px"><label for="balance" style="font-size:13px;font-weight:600;color:var(--fg-2)">Balance</label><input type="range" id="balance" min="0" max="10" step="1" value="${S.rules.balance}"><div class="slider-labels"><span>More genetic gain</span><span>Less inbreeding</span></div></div>`;
+  box.innerHTML = h;
+}
+async function runMeritSolve() {
+  const { Iram, Iewe } = indexes(); const st = S.rules; const steps = 10;
+  let lo = Infinity, hi = -Infinity; for (const v of Iram) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  const spread = hi > lo ? hi - lo : 1;
+  busy('Finding the plan with the most genetic gain…'); await tick();
+  const top = meritSolve(RES, st, Iram, Iewe, 1 / spread, 1e-4);
+  busy('Finding the plan with the least inbreeding…'); await tick();
+  const div = meritSolve(RES, st, Iram, Iewe, 1e-4 / spread, 1);
+  const dG = Math.max(1e-9, top.merit.G - div.merit.G), dD = Math.max(1e-9, (top.merit.C + top.merit.L) - (div.merit.C + div.merit.L));
+  const pts = [];
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps; let plan;
+    if (s === 0) plan = top;
+    else if (s === steps) plan = div;
+    else { busy(`Working out balance point ${s} of ${steps - 1}…`); await tick(); plan = meritSolve(RES, st, Iram, Iewe, (1 - t) / dG, t / dD); }
+    pts.push({ t, plan });
+  }
+  FRONTIER = pts;
+  PLAN = clonePlan(pts[S.rules.balance].plan);
+}
+
 /* ---------- plan ---------- */
 function readRules() {
   const n = (el, d) => { const v = $(el).value; return v === '' || isNaN(Number(v)) ? d : Math.max(0, Number(v)); };
-  S.rules.goal = $('goalWorst').checked ? 'worst' : 'mean';
+  S.rules.goal = $('goalMerit').checked ? 'merit' : $('goalWorst').checked ? 'worst' : 'mean';
   S.rules.minPer = Math.floor(n('minPer', 0)); S.rules.maxPer = Math.floor(n('maxPer', 40)); S.rules.ceiling = n('ceiling', 13);
 }
 function writeRules() {
-  $('goalMean').checked = S.rules.goal !== 'worst'; $('goalWorst').checked = S.rules.goal === 'worst';
+  $('goalMean').checked = S.rules.goal === 'mean'; $('goalWorst').checked = S.rules.goal === 'worst'; $('goalMerit').checked = S.rules.goal === 'merit';
   $('minPer').value = S.rules.minPer; $('maxPer').value = S.rules.maxPer; $('ceiling').value = S.rules.ceiling;
+}
+async function solveCurrent() {
+  if (S.rules.goal === 'merit' && S.ebv) await runMeritSolve();
+  else { FRONTIER = null; PLAN = solvePlan(RES, S.rules); }
+  rulesDirty = false;
 }
 async function runSolve() {
   if (!RES) return;
-  readRules(); busy('Solving the plan…'); await tick();
-  try { PLAN = solvePlan(RES, S.rules); rulesDirty = false; }
+  readRules();
+  if (S.rules.goal === 'merit' && !S.ebv) { toast('Load an EBV file on the Rams & ewes step first.'); renderPlan(); return; }
+  busy('Solving the plan…'); await tick();
+  try { await solveCurrent(); }
   catch (e) { toast('Solving failed: ' + (e && e.message ? e.message : 'unknown error')); }
   busy(false); persist(); renderPlan();
 }
@@ -1504,20 +1824,66 @@ function renderRuleLists() {
 }
 function renderPlan() {
   if (!RES) return;
-  writeRules(); renderRuleLists();
-  if (!PLAN) { $('planTiles').innerHTML = ''; $('planIssues').innerHTML = ''; $('planBody').innerHTML = '<div class="empty">Solve the plan to see it here.</div>'; return; }
+  writeRules(); renderRuleLists(); renderMeritBox();
+  renderPlanResults();
+}
+function meritView() { return S.rules.goal === 'merit' && S.ebv && PLAN; }
+function renderTradeoff() {
+  const card = $('tradeoffCard');
+  if (!meritView() || !FRONTIER) { card.hidden = true; return; }
+  card.hidden = false;
+  const pts = FRONTIER.map(p => ({ x: p.plan.merit.C * 100, y: p.plan.merit.G, l: p.plan.merit.L * 100 }));
+  const W = 640, H = 260, L = 56, Rm = 16, T = 14, B = 40;
+  let x0 = Math.min(...pts.map(p => p.x)), x1 = Math.max(...pts.map(p => p.x)), y0 = Math.min(...pts.map(p => p.y)), y1 = Math.max(...pts.map(p => p.y));
+  if (x1 - x0 < 1e-6) { x0 -= 0.5; x1 += 0.5; } if (y1 - y0 < 1e-6) { y0 -= 0.5; y1 += 0.5; }
+  const nice = (a, b) => { const span = b - a, step0 = span / 4, mag = Math.pow(10, Math.floor(Math.log10(step0))); const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= step0); const lo = Math.floor(a / step) * step, hi = Math.ceil(b / step) * step; const t = []; for (let v = lo; v <= hi + step * 1e-6; v += step) t.push(+v.toFixed(10)); return { lo, hi, t }; };
+  const nx = nice(x0, x1), ny = nice(y0, y1);
+  const sx = v => L + (v - nx.lo) / (nx.hi - nx.lo) * (W - L - Rm), sy = v => T + (1 - (v - ny.lo) / (ny.hi - ny.lo)) * (H - T - B);
+  const fx = v => (Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(1)).replace(/\.?0+$/, '');
+  let g = '';
+  ny.t.forEach(v => { g += `<line class="grid" x1="${L}" x2="${W - Rm}" y1="${sy(v)}" y2="${sy(v)}"/><text x="${L - 6}" y="${sy(v) + 4}" text-anchor="end">${fmtIdx(v)}</text>`; });
+  nx.t.forEach(v => { g += `<line class="grid" x1="${sx(v)}" x2="${sx(v)}" y1="${T}" y2="${H - B}"/><text x="${sx(v)}" y="${H - B + 16}" text-anchor="middle">${fx(v)}%</text>`; });
+  g += `<line class="axis" x1="${L}" x2="${W - Rm}" y1="${H - B}" y2="${H - B}"/><line class="axis" x1="${L}" x2="${L}" y1="${T}" y2="${H - B}"/>`;
+  g += `<text x="${(L + W - Rm) / 2}" y="${H - 6}" text-anchor="middle">Lamb relatedness (%), lower is better</text>`;
+  g += `<text transform="translate(14 ${(T + H - B) / 2}) rotate(-90)" text-anchor="middle">Average lamb index</text>`;
+  g += `<polyline class="ln" points="${pts.map(p => sx(p.x) + ',' + sy(p.y)).join(' ')}"/>`;
+  pts.forEach((p, k) => { g += `<circle class="pt${k === S.rules.balance ? ' cur' : ''}" cx="${sx(p.x)}" cy="${sy(p.y)}" r="${k === S.rules.balance ? 7 : 5}" data-bal="${k}" tabindex="0" role="button" aria-label="Balance ${k}: lamb index ${fmtIdx(p.y)}, relatedness ${p.x.toFixed(2)}%, lamb F ${p.l.toFixed(2)}%"><title>Balance ${k}: index ${fmtIdx(p.y)}, relatedness ${p.x.toFixed(2)}%</title></circle>`; });
+  const cur = pts[S.rules.balance], first = pts[0], last = pts[pts.length - 1];
+  $('tradeoffBody').innerHTML = `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Average lamb index against lamb relatedness for 11 balance settings">${g}</svg></div>
+    <p style="font-size:14px">This plan: lamb index ${fmtIdx(cur.y)}, relatedness ${cur.x.toFixed(2)}%, lamb F ${cur.l.toFixed(2)}%. The range runs from index ${fmtIdx(first.y)} at ${first.x.toFixed(2)}% relatedness to index ${fmtIdx(last.y)} at ${last.x.toFixed(2)}%.</p>`;
+}
+function renderPlanResults() {
+  if (!PLAN) { $('planTiles').innerHTML = ''; $('planIssues').innerHTML = ''; $('tradeoffCard').hidden = true; $('planBody').innerHTML = '<div class="empty">Solve the plan to see it here.</div>'; return; }
   const R = RES.rams.length, E = RES.ewes.length, M = RES.M; const st = planStats(RES, PLAN.assign); const counts = planCounts();
-  $('planTiles').innerHTML = `
-    <div class="tile"><div class="k">Average lamb F</div><div class="v">${pct(st.mean)}%</div><div class="s">${pct(st.randomMean)}% if paired at random</div></div>
-    <div class="tile"><div class="k">Highest lamb F</div><div class="v">${pct(st.max)}%</div></div>
-    <div class="tile"><div class="k">Ewes placed</div><div class="v">${fmtInt(st.placed)} / ${fmtInt(E)}</div></div>
-    <div class="tile"><div class="k">Rams used</div><div class="v">${st.ramsUsed} / ${R}</div></div>`;
+  const mv = meritView(); const IX = mv ? indexes() : null; const mm = mv ? meritMeasures(RES, PLAN.assign, IX.Iram, IX.Iewe) : null;
+  if (mv) {
+    let ir = 0; IX.Iram.forEach(v => { ir += v; }); let ie = 0, pe = 0; PLAN.assign.forEach((j, i) => { if (j >= 0) { ie += IX.Iewe[i]; pe++; } });
+    const equal = 0.5 * (ir / R + (pe ? ie / pe : 0));
+    $('planTiles').innerHTML = `
+      <div class="tile"><div class="k">Average lamb index</div><div class="v">${fmtIdx(mm.G)}</div><div class="s">${signed(mm.G - equal)} vs using every ram equally</div></div>
+      <div class="tile"><div class="k">Average lamb F</div><div class="v">${pct(mm.L)}%</div><div class="s">highest ${pct(st.max)}%</div></div>
+      <div class="tile"><div class="k">Lamb relatedness</div><div class="v">${pct(mm.C)}%</div><div class="s">future F if these lambs are interbred</div></div>
+      <div class="tile"><div class="k">Rams used</div><div class="v">${st.ramsUsed} / ${R}</div><div class="s">${fmtInt(st.placed)} of ${fmtInt(E)} ewes placed</div></div>`;
+  } else {
+    $('planTiles').innerHTML = `
+      <div class="tile"><div class="k">Average lamb F</div><div class="v">${pct(st.mean)}%</div><div class="s">${pct(st.randomMean)}% if paired at random</div></div>
+      <div class="tile"><div class="k">Highest lamb F</div><div class="v">${pct(st.max)}%</div></div>
+      <div class="tile"><div class="k">Ewes placed</div><div class="v">${fmtInt(st.placed)} / ${fmtInt(E)}</div></div>
+      <div class="tile"><div class="k">Rams used</div><div class="v">${st.ramsUsed} / ${R}</div></div>`;
+  }
   let iss = '';
   if (rulesDirty) iss += `<div class="issue"><div class="t">The rules changed since this plan was solved.</div><div class="row"><button type="button" class="small" data-planact="solve">Solve again</button></div></div>`;
   for (const x of PLAN.issues) {
     if (x.type === 'capacity') iss += `<div class="issue"><div class="t">The rams have room for ${fmtInt(x.room)} ewes, but ${fmtInt(x.need)} need a ram. Raise the max ewes per ram to ${x.suggest} or add a ram.</div><div class="row"><button type="button" class="small" data-planact="setmax" data-v="${x.suggest}">Set max to ${x.suggest} and solve</button></div></div>`;
     else if (x.type === 'mins') iss += `<div class="issue"><div class="t">The minimums add up to ${fmtInt(x.sumMin)} ewes, but only ${fmtInt(x.have)} can be placed, so some rams will get fewer than their minimum.</div></div>`;
     else if (x.type === 'overlocked') iss += `<div class="issue"><div class="t"><span class="mono">${esc(x.ram)}</span> has ${x.locked} locked ewes but a maximum of ${x.max}.</div></div>`;
+  }
+  if (mv && !rulesDirty) {
+    const room = RES.rams.reduce((a, _, j) => a + maxFor(j), 0);
+    if (room >= E && room - E < Math.max(5, 0.15 * E)) iss += `<div class="issue"><div class="t">The rams can take only ${fmtInt(room - E)} more ewes than you have, so the plan has little room to give the better rams more ewes. Raise the max ewes per ram for more genetic gain.</div></div>`;
+    if (!IX.active) iss += '<div class="issue"><div class="t">The selection index has no weights, so the plan is working on inbreeding alone. Set a weight for at least one EBV.</div></div>';
+    if (IX.missing) iss += `<p class="muted" style="font-size:13px">${IX.missing} ${plural(IX.missing, 'animal has', 'animals have')} no value for part of the index and ${IX.missing === 1 ? 'was' : 'were'} given the group average.</p>`;
+    if (!FRONTIER) iss += '<p class="muted" style="font-size:13px">Solve again to compare other balance settings.</p>';
   }
   const byReason = { ceiling: [], room: [] }; PLAN.unplaced.forEach(u => (byReason[u.reason] || byReason.room).push(u.e));
   if (byReason.ceiling.length) iss += `<div class="issue"><div class="t">${byReason.ceiling.length} ${plural(byReason.ceiling.length, 'ewe has', 'ewes have')} no ram: every ram is above the ${esc(S.rules.ceiling)}% limit or forbidden. <span class="mono">${byReason.ceiling.slice(0, 10).map(i => { let m = Infinity; for (let j = 0; j < R; j++) m = Math.min(m, M[i * R + j]); return esc(RES.ewes[i]) + ' (lowest ' + pct(m) + '%)'; }).join(', ')}${byReason.ceiling.length > 10 ? ', …' : ''}</span></div></div>`;
@@ -1529,30 +1895,31 @@ function renderPlan() {
   if (overC) iss += `<div class="issue"><div class="t">${overC} hand-picked ${plural(overC, 'pair is', 'pairs are')} above the ${esc(S.rules.ceiling)}% limit.</div></div>`;
   if (S.rules.goal === 'worst' && PLAN.worstLimit != null && !rulesDirty) iss += `<p class="muted" style="font-size:13px">No ewe could be placed with a lamb F below ${pct(PLAN.worstLimit)}%; within that, the average was kept as low as possible.</p>`;
   const manualN = [...PLAN.manual].filter(Boolean).length;
-  if (!rulesDirty && S.rules.minPer === 0 && st.ramsUsed < R && !PLAN.unplaced.length) {
+  if (!mv && !rulesDirty && S.rules.minPer === 0 && st.ramsUsed < R && !PLAN.unplaced.length) {
     const unused = RES.rams.filter((_, j) => counts[j] === 0);
     iss += `<p class="muted" style="font-size:13px">${unused.map(esc).join(', ')} ${unused.length === 1 ? 'gets' : 'get'} no ewes because every ewe had a lower-F ram. Set a minimum per ram to use ${unused.length === 1 ? 'it' : 'them'}.</p>`;
   }
   if (manualN) iss += `<p class="muted" style="font-size:13px">${manualN} ${plural(manualN, 'ewe was', 'ewes were')} changed by hand and ${manualN === 1 ? 'is' : 'are'} locked.</p>`;
   $('planIssues').innerHTML = iss;
+  renderTradeoff();
 
   $('tabByEwe').setAttribute('aria-selected', planTab === 'ewe'); $('tabByRam').setAttribute('aria-selected', planTab === 'ram');
   if (planTab === 'ewe') {
     const lockSet = new Set(S.rules.locked.map(([r, e]) => r + '\u0001' + e));
     const rows = RES.ewes.map((eid, i) => {
       const j = PLAN.assign[i];
-      const opts = `<option value="-1"${j < 0 ? ' selected' : ''}>none</option>` + RES.rams.map((rid, k) => `<option value="${k}"${k === j ? ' selected' : ''}>${esc(rid)} · ${pct(M[i * R + k])}%</option>`).join('');
+      const opts = `<option value="-1"${j < 0 ? ' selected' : ''}>none</option>` + RES.rams.map((rid, k) => `<option value="${k}"${k === j ? ' selected' : ''}>${esc(rid)} · ${pct(M[i * R + k])}%${mv ? ' · ' + fmtIdx(IX.Iram[k]) : ''}</option>`).join('');
       const f = j >= 0 ? M[i * R + j] : null;
       const nb = j >= 0 ? nextBest(i, counts) : null;
       const isLocked = j >= 0 && lockSet.has(RES.rams[j] + '\u0001' + eid);
-      return `<tr><td class="mono">${esc(eid)}</td><td><select data-assign="${i}" aria-label="Ram for ${esc(eid)}">${opts}</select></td><td>${f == null ? '<span class="fchip none">not placed</span>' : `<span class="fchip b${band(f)}">${pct(f)}%</span>`}</td><td class="mono" style="font-size:13px">${nb ? `${esc(RES.rams[nb.j])} · ${pct(nb.f)}%${nb.full ? ' <span class="muted">(full)</span>' : ''}` : '<span class="muted">—</span>'}</td><td><input type="checkbox" data-lock="${i}" aria-label="Lock ${esc(eid)} to its ram"${isLocked ? ' checked' : ''}${j < 0 ? ' disabled' : ''}></td></tr>`;
+      return `<tr><td class="mono">${esc(eid)}</td><td><select data-assign="${i}" aria-label="Ram for ${esc(eid)}">${opts}</select></td><td>${f == null ? '<span class="fchip none">not placed</span>' : `<span class="fchip b${band(f)}">${pct(f)}%</span>`}</td>${mv ? `<td class="num">${j >= 0 ? fmtIdx(0.5 * (IX.Iram[j] + IX.Iewe[i])) : '—'}</td>` : ''}<td class="mono" style="font-size:13px">${nb ? `${esc(RES.rams[nb.j])} · ${pct(nb.f)}%${nb.full ? ' <span class="muted">(full)</span>' : ''}` : '<span class="muted">—</span>'}</td><td><input type="checkbox" data-lock="${i}" aria-label="Lock ${esc(eid)} to its ram"${isLocked ? ' checked' : ''}${j < 0 ? ' disabled' : ''}></td></tr>`;
     }).join('');
-    $('planBody').innerHTML = `<div class="tablebox scroll-520"><table class="data"><thead><tr><th>Ewe</th><th>Ram</th><th>Lamb F</th><th>Next-best ram</th><th>Lock</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    $('planBody').innerHTML = `<div class="tablebox scroll-520"><table class="data"><thead><tr><th>Ewe</th><th>Ram${mv ? ' · lamb F · ram index' : ''}</th><th>Lamb F</th>${mv ? '<th>Lamb index</th>' : ''}<th>Lowest-F other ram</th><th>Lock</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   } else {
     const groups = RES.rams.map((rid, j) => {
       const list = []; let s = 0, mx = 0;
       PLAN.assign.forEach((jj, i) => { if (jj === j) { list.push(RES.ewes[i]); const f = M[i * R + j]; s += f; mx = Math.max(mx, f); } });
-      return `<div class="group"><div class="gh"><span class="gid">${esc(rid)}</span><span class="muted num" style="font-size:13px">${list.length} / ${maxFor(j)} ewes</span></div><div style="font-size:13px">${list.length ? `average ${pct(s / list.length)}% · highest ${pct(mx)}%` : '<span class="muted">no ewes</span>'}</div><div class="ewes">${list.map(esc).join(', ')}</div></div>`;
+      return `<div class="group"><div class="gh"><span class="gid">${esc(rid)}</span><span class="muted num" style="font-size:13px">${list.length} / ${maxFor(j)} ewes</span></div>${mv ? `<div style="font-size:13px">Index ${fmtIdx(IX.Iram[j])}</div>` : ''}<div style="font-size:13px">${list.length ? `lamb F average ${pct(s / list.length)}% · highest ${pct(mx)}%` : '<span class="muted">no ewes</span>'}</div><div class="ewes">${list.map(esc).join(', ')}</div></div>`;
     }).join('');
     const un = PLAN.assign.reduce((a, j, i) => (j < 0 ? a.concat(RES.ewes[i]) : a), []);
     $('planBody').innerHTML = `<div class="groups">${groups}${un.length ? `<div class="group"><div class="gh"><span class="gid">Not placed</span><span class="muted num" style="font-size:13px">${un.length}</span></div><div class="ewes">${un.map(esc).join(', ')}</div></div>` : ''}</div>`;
@@ -1563,37 +1930,44 @@ function renderPlan() {
 function planRows() {
   const R = RES.rams.length, M = RES.M; const counts = planCounts();
   const lockSet = new Set(S.rules.locked.map(([r, e]) => r + '\u0001' + e));
+  const IX = meritView() ? indexes() : null;
   return RES.ewes.map((eid, i) => {
     const j = PLAN.assign[i]; const nb = j >= 0 ? nextBest(i, counts) : null;
-    return [eid, j >= 0 ? RES.rams[j] : '', j >= 0 ? +(M[i * R + j] * 100).toFixed(4) : '', nb ? RES.rams[nb.j] : '', nb ? +(nb.f * 100).toFixed(4) : '', j >= 0 && lockSet.has(RES.rams[j] + '\u0001' + eid) ? 'yes' : ''];
+    const row = [eid, j >= 0 ? RES.rams[j] : '', j >= 0 ? +(M[i * R + j] * 100).toFixed(4) : ''];
+    if (IX) row.push(j >= 0 ? +IX.Iram[j].toFixed(4) : '', +IX.Iewe[i].toFixed(4), j >= 0 ? +(0.5 * (IX.Iram[j] + IX.Iewe[i])).toFixed(4) : '');
+    row.push(nb ? RES.rams[nb.j] : '', nb ? +(nb.f * 100).toFixed(4) : '', j >= 0 && lockSet.has(RES.rams[j] + '\u0001' + eid) ? 'yes' : '');
+    return row;
   });
 }
-const PLAN_HEAD = ['Ewe', 'Ram', 'Lamb F (%)', 'Next-best ram', 'Next-best lamb F (%)', 'Locked'];
+function planHead() { return ['Ewe', 'Ram', 'Lamb F (%)'].concat(meritView() ? ['Ram index', 'Ewe index', 'Lamb index'] : [], ['Lowest-F other ram', 'Its lamb F (%)', 'Locked']); }
 function matrixRows() {
   const R = RES.rams.length;
   return [['Ewe'].concat(RES.rams)].concat(RES.ewes.map((e, i) => [e].concat(RES.rams.map((_, j) => +(RES.M[i * R + j] * 100).toFixed(4)))));
 }
 function groupRows() {
-  const R = RES.rams.length;
-  return [['Ram', 'Ewes', 'Average lamb F (%)', 'Highest lamb F (%)', 'Ewe IDs']].concat(RES.rams.map((rid, j) => {
+  const R = RES.rams.length; const IX = meritView() ? indexes() : null;
+  return [['Ram'].concat(IX ? ['Ram index'] : [], ['Ewes', 'Average lamb F (%)', 'Highest lamb F (%)', 'Ewe IDs'])].concat(RES.rams.map((rid, j) => {
     const list = []; let s = 0, mx = 0;
     PLAN.assign.forEach((jj, i) => { if (jj === j) { list.push(RES.ewes[i]); const f = RES.M[i * R + j]; s += f; mx = Math.max(mx, f); } });
-    return [rid, list.length, list.length ? +(s / list.length * 100).toFixed(4) : '', list.length ? +(mx * 100).toFixed(4) : '', list.join(', ')];
+    return [rid].concat(IX ? [+IX.Iram[j].toFixed(4)] : [], [list.length, list.length ? +(s / list.length * 100).toFixed(4) : '', list.length ? +(mx * 100).toFixed(4) : '', list.join(', ')]);
   }));
 }
-function ruleSummary() { return `${S.rules.goal === 'worst' ? 'Lowest worst-case' : 'Lowest average'} lamb F · ${S.rules.minPer} to ${S.rules.maxPer} ewes per ram · no lamb above ${S.rules.ceiling}%`; }
+function ruleSummary() {
+  const g = S.rules.goal === 'merit' ? `Genetic merit and inbreeding (${indexLabel()}; balance ${S.rules.balance} of 10)` : S.rules.goal === 'worst' ? 'Lowest worst-case lamb F' : 'Lowest average lamb F';
+  return `${g} · ${S.rules.minPer} to ${S.rules.maxPer} ewes per ram · no lamb above ${S.rules.ceiling}%`;
+}
 async function exportXlsx() {
   if (!RES || !PLAN) return;
   try {
     busy('Building the workbook…'); await loadLib('xlsx');
     const wb = XLSX.utils.book_new(); const add = (rows, name) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), name);
-    add([PLAN_HEAD].concat(planRows()), 'Mating plan');
+    add([planHead()].concat(planRows()), 'Mating plan');
     add(groupRows(), 'Ram groups');
     add(matrixRows(), 'Lamb F matrix');
     add([['ID', 'Role', 'Born', 'Own F (%)', 'Complete generations', 'In pedigree']].concat(
       RES.rams.map(id => ['ram', id]).concat(RES.ewes.map(id => ['ewe', id])).map(([role, id]) => { const i = PED.index.get(id); return [id, role, i != null && PED.birth[i] != null ? PED.birth[i] : '', +(RES.own.get(id) * 100).toFixed(4), i != null ? +PED.eq[i].toFixed(2) : '', i != null ? 'yes' : 'no']; })), 'Animals');
     add([['Type', 'Message']].concat(CHECK.errors.map(e => ['error', e.type + ': ' + (e.id || (e.cycle || []).join(' > '))])).concat(CHECK.warnings.flatMap(w => [['warning', w.text]].concat((w.items || []).slice(0, 500).map(x => ['', x])))), 'Pedigree check');
-    add([['Setting', 'Value'], ['Pedigree file', S.src.name], ['Date', today()], ['Goal', S.rules.goal === 'worst' ? 'Lowest worst-case lamb F' : 'Lowest average lamb F'], ['Min ewes per ram', S.rules.minPer], ['Max ewes per ram', S.rules.maxPer], ['Lamb F limit (%)', S.rules.ceiling], ['Matrix flag (%)', S.threshold], ['Locked pairs', S.rules.locked.map(p => p.join(' x ')).join('; ')], ['Forbidden pairs', S.rules.forbidden.map(p => p.join(' x ')).join('; ')], ['Method', 'Pedigree relationships by Colleau (2002); lamb F = half the ram-ewe relationship']], 'Settings');
+    add([['Setting', 'Value'], ['Pedigree file', S.src.name], ['Date', today()], ['Goal', S.rules.goal === 'merit' ? 'Genetic merit and inbreeding' : S.rules.goal === 'worst' ? 'Lowest worst-case lamb F' : 'Lowest average lamb F'], ['Selection index', S.rules.goal === 'merit' ? indexLabel() : ''], ['Balance (0 = most gain, 10 = least inbreeding)', S.rules.goal === 'merit' ? S.rules.balance : ''], ['EBV file', S.ebv ? S.ebv.name : ''], ['Min ewes per ram', S.rules.minPer], ['Max ewes per ram', S.rules.maxPer], ['Lamb F limit (%)', S.rules.ceiling], ['Matrix flag (%)', S.threshold], ['Locked pairs', S.rules.locked.map(p => p.join(' x ')).join('; ')], ['Forbidden pairs', S.rules.forbidden.map(p => p.join(' x ')).join('; ')], ['Method', 'Pedigree relationships by Colleau (2002); lamb F = half the ram-ewe relationship']], 'Settings');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     busy(false);
     await saveFile(`${baseName()}_mating_plan.xlsx`, new Blob([out]));
@@ -1611,10 +1985,13 @@ async function exportPdf() {
     doc.text(ruleSummary(), 40, 84);
     doc.setTextColor(20); doc.setFontSize(11);
     doc.text(`Average lamb F: ${pct(st.mean)}%  (${pct(st.randomMean)}% if paired at random)     Highest lamb F: ${pct(st.max)}%     Ewes placed: ${st.placed} of ${RES.ewes.length}`, 40, 106);
+    const mv = meritView();
+    if (mv) { const IX = indexes(); const mm = meritMeasures(RES, PLAN.assign, IX.Iram, IX.Iewe); doc.text(`Average lamb index: ${fmtIdx(mm.G)}     Lamb relatedness: ${pct(mm.C)}%`, 40, 121); }
     const g = groupRows();
-    doc.autoTable({ startY: 122, head: [g[0].slice(0, 4).concat(['Ewes in group'])], body: g.slice(1).map(r => [r[0], r[1], r[2] === '' ? '' : pct(r[2] / 100) + '%', r[3] === '' ? '' : pct(r[3] / 100) + '%', r[4]]), styles: { fontSize: 8.5, cellPadding: 4, overflow: 'linebreak' }, headStyles: { fillColor: [31, 78, 140] }, columnStyles: { 4: { cellWidth: 260 } }, margin: { left: 40, right: 40 } });
+    const gh = g[0]; const lastCol = gh.length - 1;
+    doc.autoTable({ startY: mv ? 136 : 122, head: [gh.slice(0, lastCol).map(h => h.replace(' (%)', '')).concat(['Ewes in group'])], body: g.slice(1).map(r => r.map((v, k) => (k < lastCol && /\(%\)/.test(gh[k]) && v !== '') ? pct(v / 100) + '%' : v)), styles: { fontSize: 8.5, cellPadding: 4, overflow: 'linebreak' }, headStyles: { fillColor: [31, 78, 140] }, columnStyles: { [lastCol]: { cellWidth: 240 } }, margin: { left: 40, right: 40 } });
     const rows = planRows();
-    doc.autoTable({ startY: doc.lastAutoTable.finalY + 20, head: [['Ewe', 'Ram', 'Lamb F', 'Next-best ram', 'Next-best F']], body: rows.map(r => [r[0], r[1] || 'not placed', r[2] === '' ? '' : pct(r[2] / 100) + '%', r[3], r[4] === '' ? '' : pct(r[4] / 100) + '%']), styles: { fontSize: 8.5, cellPadding: 3 }, headStyles: { fillColor: [31, 78, 140] }, margin: { left: 40, right: 40 } });
+    doc.autoTable({ startY: doc.lastAutoTable.finalY + 20, head: [mv ? ['Ewe', 'Ram', 'Lamb F', 'Lamb index'] : ['Ewe', 'Ram', 'Lamb F', 'Lowest-F other ram', 'Its F']], body: rows.map(r => mv ? [r[0], r[1] || 'not placed', r[2] === '' ? '' : pct(r[2] / 100) + '%', r[5] === '' ? '' : fmtIdx(r[5])] : [r[0], r[1] || 'not placed', r[2] === '' ? '' : pct(r[2] / 100) + '%', r[3], r[4] === '' ? '' : pct(r[4] / 100) + '%']), styles: { fontSize: 8.5, cellPadding: 3 }, headStyles: { fillColor: [31, 78, 140] }, margin: { left: 40, right: 40 } });
     const pages = doc.getNumberOfPages();
     for (let p = 1; p <= pages; p++) { doc.setPage(p); doc.setFontSize(8); doc.setTextColor(120); doc.text(`Lamb F = predicted inbreeding of the lamb from the pedigree.  Page ${p} of ${pages}`, 40, doc.internal.pageSize.getHeight() - 24); }
     const out = doc.output('arraybuffer'); busy(false);
@@ -1716,6 +2093,9 @@ function wire() {
     BREEDERS.pending = [];
     persist(); route();
   });
+  $('btnEbv').addEventListener('click', () => $('ebvFile').click());
+  $('ebvFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadEbvFile(f); });
+  $('btnEbvClear').addEventListener('click', () => { S.ebv = null; if (S.rules.goal === 'merit') markDirty(); else FRONTIER = null; persist(); route(); toast('EBVs removed.'); });
   $('btnCalc').addEventListener('click', runCalc);
   // matrix
   let thrTimer = null;
@@ -1741,25 +2121,26 @@ function wire() {
       const other = listName === 'locked' ? 'forbidden' : 'locked';
       S.rules[other] = S.rules[other].filter(([r, x]) => !(r === ram && x === ewe));
     }
-    rulesDirty = true; persist(); renderPair();
+    markDirty(); persist(); renderPair();
     toast(k >= 0 ? 'Removed. Solve the plan again to apply it.' : (listName === 'locked' ? 'Locked. Solve the plan again to apply it.' : 'Forbidden. Solve the plan again to apply it.'));
   });
   $('btnMatrixCsv').addEventListener('click', () => { if (RES) saveFile(`${baseName()}_lamb_F_matrix.csv`, toCSV(matrixRows()), 'text/csv'); });
   // plan rules
-  ['goalMean', 'goalWorst', 'minPer', 'maxPer', 'ceiling'].forEach(id => $(id).addEventListener('change', () => { readRules(); rulesDirty = true; persist(); renderPlan(); }));
+  ['goalMean', 'goalWorst', 'goalMerit', 'minPer', 'maxPer', 'ceiling'].forEach(id => $(id).addEventListener('change', () => { readRules(); markDirty(); persist(); renderPlan(); }));
   $('btnSolve').addEventListener('click', runSolve);
-  $('btnResetRules').addEventListener('click', () => { Object.assign(S.rules, DEFAULT_RULES, { perRam: {} }); rulesDirty = true; persist(); renderPlan(); toast('Rules reset to 40 ewes per ram and 13%. Locked and forbidden pairs were kept.'); });
+  $('btnResetRules').addEventListener('click', () => { Object.assign(S.rules, { minPer: 0, maxPer: 40, ceiling: 13, perRam: {} }); markDirty(); persist(); renderPlan(); toast('Rules reset to 40 ewes per ram and 13%. Locked and forbidden pairs were kept.'); });
   $('perRamBox').addEventListener('change', e => {
     const t = e.target; if (!t.dataset.perram) return;
     const o = S.rules.perRam[t.dataset.perram] = S.rules.perRam[t.dataset.perram] || {};
     if (t.value === '') delete o[t.dataset.k]; else o[t.dataset.k] = Math.max(0, Math.floor(Number(t.value)));
     if (!Object.keys(o).length) delete S.rules.perRam[t.dataset.perram];
-    rulesDirty = true; persist(); renderPlan(); $('perRamDetails').open = true;
+    markDirty(); persist(); renderPlan(); $('perRamDetails').open = true;
   });
   document.querySelector('#view-plan').addEventListener('click', e => {
     const b = e.target.closest('[data-unrule],[data-planact]'); if (!b) return;
-    if (b.dataset.unrule) { S.rules[b.dataset.unrule].splice(Number(b.dataset.k), 1); rulesDirty = true; }
+    if (b.dataset.unrule) { S.rules[b.dataset.unrule].splice(Number(b.dataset.k), 1); markDirty(); }
     else if (b.dataset.planact === 'solve') { runSolve(); return; }
+    else if (b.dataset.planact === 'toebv') { go('animals'); return; }
     else if (b.dataset.planact === 'setmax') { S.rules.maxPer = Number(b.dataset.v); writeRules(); runSolve(); return; }
     persist(); renderPlan();
   });
@@ -1767,8 +2148,22 @@ function wire() {
     const r = $('forbRam').value, e = $('forbEwe').value; if (!r || !e) return;
     if (!S.rules.forbidden.some(([a, b]) => a === r && b === e)) S.rules.forbidden.push([r, e]);
     S.rules.locked = S.rules.locked.filter(([a, b]) => !(a === r && b === e));
-    rulesDirty = true; persist(); renderPlan();
+    markDirty(); persist(); renderPlan();
   });
+  $('meritBox').addEventListener('change', e => {
+    const t = e.target;
+    if (t.id === 'indexSel') { const v = t.value; S.index = Object.assign({ weights: {} }, S.index, v === 'w' ? { mode: 'w' } : { mode: 'col', col: v.slice(4) }); markDirty(); persist(); renderPlan(); }
+    else if (t.dataset.weight != null) { const c = t.dataset.weight, v = t.value.trim(); S.index.weights = S.index.weights || {}; if (v === '' || isNaN(Number(v))) delete S.index.weights[c]; else S.index.weights[c] = Number(v); markDirty(); persist(); renderPlanResults(); }
+  });
+  $('meritBox').addEventListener('input', e => {
+    if (e.target.id !== 'balance') return;
+    S.rules.balance = Number(e.target.value);
+    if (FRONTIER && !rulesDirty) PLAN = clonePlan(FRONTIER[S.rules.balance].plan); else if (PLAN) rulesDirty = true;
+    persist(); renderPlanResults();
+  });
+  const pickPoint = el => { const c = el.closest('[data-bal]'); if (!c || !FRONTIER) return; S.rules.balance = Number(c.dataset.bal); PLAN = clonePlan(FRONTIER[S.rules.balance].plan); const sl = $('balance'); if (sl) sl.value = S.rules.balance; persist(); renderPlanResults(); };
+  $('tradeoffBody').addEventListener('click', e => pickPoint(e.target));
+  $('tradeoffBody').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickPoint(e.target); } });
   $('tabByEwe').addEventListener('click', () => { planTab = 'ewe'; renderPlan(); });
   $('tabByRam').addEventListener('click', () => { planTab = 'ram'; renderPlan(); });
   $('planBody').addEventListener('change', e => {
@@ -1786,7 +2181,7 @@ function wire() {
       persist(); renderRuleLists();
     }
   });
-  $('btnPlanCsv').addEventListener('click', () => { if (PLAN) saveFile(`${baseName()}_mating_plan.csv`, toCSV([PLAN_HEAD].concat(planRows())), 'text/csv'); });
+  $('btnPlanCsv').addEventListener('click', () => { if (PLAN) saveFile(`${baseName()}_mating_plan.csv`, toCSV([planHead()].concat(planRows())), 'text/csv'); });
   $('btnXlsx').addEventListener('click', exportXlsx);
   $('btnPdf').addEventListener('click', exportPdf);
   // project
