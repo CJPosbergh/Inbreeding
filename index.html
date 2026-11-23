@@ -210,6 +210,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); min-height: 32px
 .chart .pt.cur { fill: var(--accent); }
 .chart .ln { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0.5; }
 .weights td { padding: 5px 10px; }
+.weightsbox { resize: vertical; overflow: auto; min-height: 120px; max-height: none; }
 .empty { padding: 28px 20px; text-align: center; color: var(--fg-2); display: flex; flex-direction: column; gap: 12px; align-items: center; }
 
 footer { max-width: 1280px; margin: 0 auto; padding-block: 0 32px; color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 20px; justify-content: space-between; }
@@ -395,7 +396,7 @@ footer { max-width: 1280px; margin: 0 auto; padding-block: 0 32px; color: var(--
           <legend>Goal</legend>
           <label class="radio"><input type="radio" name="goal" id="goalMean" value="mean" checked>Lowest average lamb F</label>
           <label class="radio"><input type="radio" name="goal" id="goalWorst" value="worst">Lowest worst-case lamb F</label>
-          <label class="radio"><input type="radio" name="goal" id="goalMerit" value="merit">Genetic merit and inbreeding (like MateSel)</label>
+          <label class="radio"><input type="radio" name="goal" id="goalMerit" value="merit">Highest genetic merit and minimizing inbreeding</label>
         </fieldset>
         <div id="meritBox" style="display:flex;flex-direction:column;gap:12px" hidden></div>
         <div class="grid3" style="grid-template-columns:repeat(2,minmax(0,1fr))">
@@ -1670,6 +1671,7 @@ function renderPair() {
 
 function markDirty() { rulesDirty = true; FRONTIER = null; }
 /* ---------- EBVs and selection index ---------- */
+const weightsView = { all: false, height: '', scroll: 0 };
 let FRONTIER = null; // balance points from the last merit solve: [{ t, plan }]
 let EBVNORM = null, EBVNORM_SRC = null;
 const normId = id => String(id).trim().toUpperCase().replace(/^0+(?=.)/, '');
@@ -1751,9 +1753,18 @@ function renderMeritBox() {
   const ix = S.index;
   const cov = c => { const k = S.ebv.cols.indexOf(c); return RES.rams.filter(id => { const r = ebvRow(id); return r && r[k] != null; }).length; };
   let h = `<label class="field">Selection goal<select id="indexSel"><option value="w"${ix.mode === 'w' ? ' selected' : ''}>Weighted EBVs (build an index)</option>${S.ebv.cols.map(c => `<option value="col:${esc(c)}"${ix.mode === 'col' && ix.col === c ? ' selected' : ''}>Use column: ${esc(c)}</option>`).join('')}</select></label>`;
-  if (ix.mode === 'w') h += `<div class="tablebox" style="max-height:260px"><table class="data weights"><thead><tr><th>EBV</th><th>Weight</th><th>Rams with it</th></tr></thead><tbody>${S.ebv.cols.map(c => `<tr><td>${esc(c)}</td><td><input type="number" step="any" data-weight="${esc(c)}" value="${ix.weights[c] != null ? esc(ix.weights[c]) : ''}" placeholder="0" style="width:90px;min-height:34px" aria-label="Weight for ${esc(c)}"></td><td class="num">${cov(c)} / ${RES.rams.length}</td></tr>`).join('')}</tbody></table></div><p class="muted" style="font-size:13px">Weight per unit of EBV: positive to raise the trait, negative to lower it, blank to leave it out.</p>`;
+  if (ix.mode === 'w') {
+    // keep the size the viewer dragged the box to, and its scroll position, across re-renders
+    const prev = document.getElementById('weightsBox');
+    if (prev) { if (prev.style.height) weightsView.height = prev.style.height; weightsView.scroll = prev.scrollTop; }
+    const nCols = S.ebv.cols.length, canGrow = nCols > 5;
+    const height = weightsView.all ? 'auto' : (weightsView.height || (canGrow ? '260px' : 'auto'));
+    h += `<div class="row" style="justify-content:space-between"><span style="font-size:13px;font-weight:600;color:var(--fg-2)">EBV weights</span>${canGrow ? `<button type="button" class="small" id="weightsToggle" aria-controls="weightsBox" aria-expanded="${weightsView.all}">${weightsView.all ? 'Show fewer' : `Show all ${nCols} EBVs`}</button>` : ''}</div>`;
+    h += `<div class="tablebox weightsbox" id="weightsBox" style="height:${height}"><table class="data weights"><thead><tr><th>EBV</th><th>Weight</th><th>Rams with it</th></tr></thead><tbody>${S.ebv.cols.map(c => `<tr><td>${esc(c)}</td><td><input type="number" step="any" data-weight="${esc(c)}" value="${ix.weights[c] != null ? esc(ix.weights[c]) : ''}" placeholder="0" style="width:90px;min-height:34px" aria-label="Weight for ${esc(c)}"></td><td class="num">${cov(c)} / ${RES.rams.length}</td></tr>`).join('')}</tbody></table></div><p class="muted" style="font-size:13px">Weight per unit of EBV: positive to raise the trait, negative to lower it, blank to leave it out.${canGrow && !weightsView.all ? ' Drag the box’s lower corner to make it taller.' : ''}</p>`;
+  }
   h += `<div style="display:flex;flex-direction:column;gap:2px"><label for="balance" style="font-size:13px;font-weight:600;color:var(--fg-2)">Balance</label><input type="range" id="balance" min="0" max="10" step="1" value="${S.rules.balance}"><div class="slider-labels"><span>More genetic gain</span><span>Less inbreeding</span></div></div>`;
   box.innerHTML = h;
+  const wb = document.getElementById('weightsBox'); if (wb && weightsView.scroll) wb.scrollTop = weightsView.scroll;
 }
 async function runMeritSolve() {
   const { Iram, Iewe } = indexes(); const st = S.rules; const steps = 10;
@@ -1953,7 +1964,7 @@ function groupRows() {
   }));
 }
 function ruleSummary() {
-  const g = S.rules.goal === 'merit' ? `Genetic merit and inbreeding (${indexLabel()}; balance ${S.rules.balance} of 10)` : S.rules.goal === 'worst' ? 'Lowest worst-case lamb F' : 'Lowest average lamb F';
+  const g = S.rules.goal === 'merit' ? `Highest genetic merit and minimizing inbreeding (${indexLabel()}; balance ${S.rules.balance} of 10)` : S.rules.goal === 'worst' ? 'Lowest worst-case lamb F' : 'Lowest average lamb F';
   return `${g} · ${S.rules.minPer} to ${S.rules.maxPer} ewes per ram · no lamb above ${S.rules.ceiling}%`;
 }
 async function exportXlsx() {
@@ -1967,7 +1978,7 @@ async function exportXlsx() {
     add([['ID', 'Role', 'Born', 'Own F (%)', 'Complete generations', 'In pedigree']].concat(
       RES.rams.map(id => ['ram', id]).concat(RES.ewes.map(id => ['ewe', id])).map(([role, id]) => { const i = PED.index.get(id); return [id, role, i != null && PED.birth[i] != null ? PED.birth[i] : '', +(RES.own.get(id) * 100).toFixed(4), i != null ? +PED.eq[i].toFixed(2) : '', i != null ? 'yes' : 'no']; })), 'Animals');
     add([['Type', 'Message']].concat(CHECK.errors.map(e => ['error', e.type + ': ' + (e.id || (e.cycle || []).join(' > '))])).concat(CHECK.warnings.flatMap(w => [['warning', w.text]].concat((w.items || []).slice(0, 500).map(x => ['', x])))), 'Pedigree check');
-    add([['Setting', 'Value'], ['Pedigree file', S.src.name], ['Date', today()], ['Goal', S.rules.goal === 'merit' ? 'Genetic merit and inbreeding' : S.rules.goal === 'worst' ? 'Lowest worst-case lamb F' : 'Lowest average lamb F'], ['Selection index', S.rules.goal === 'merit' ? indexLabel() : ''], ['Balance (0 = most gain, 10 = least inbreeding)', S.rules.goal === 'merit' ? S.rules.balance : ''], ['EBV file', S.ebv ? S.ebv.name : ''], ['Min ewes per ram', S.rules.minPer], ['Max ewes per ram', S.rules.maxPer], ['Lamb F limit (%)', S.rules.ceiling], ['Matrix flag (%)', S.threshold], ['Locked pairs', S.rules.locked.map(p => p.join(' x ')).join('; ')], ['Forbidden pairs', S.rules.forbidden.map(p => p.join(' x ')).join('; ')], ['Method', 'Pedigree relationships by Colleau (2002); lamb F = half the ram-ewe relationship']], 'Settings');
+    add([['Setting', 'Value'], ['Pedigree file', S.src.name], ['Date', today()], ['Goal', S.rules.goal === 'merit' ? 'Highest genetic merit and minimizing inbreeding' : S.rules.goal === 'worst' ? 'Lowest worst-case lamb F' : 'Lowest average lamb F'], ['Selection index', S.rules.goal === 'merit' ? indexLabel() : ''], ['Balance (0 = most gain, 10 = least inbreeding)', S.rules.goal === 'merit' ? S.rules.balance : ''], ['EBV file', S.ebv ? S.ebv.name : ''], ['Min ewes per ram', S.rules.minPer], ['Max ewes per ram', S.rules.maxPer], ['Lamb F limit (%)', S.rules.ceiling], ['Matrix flag (%)', S.threshold], ['Locked pairs', S.rules.locked.map(p => p.join(' x ')).join('; ')], ['Forbidden pairs', S.rules.forbidden.map(p => p.join(' x ')).join('; ')], ['Method', 'Pedigree relationships by Colleau (2002); lamb F = half the ram-ewe relationship']], 'Settings');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     busy(false);
     await saveFile(`${baseName()}_mating_plan.xlsx`, new Blob([out]));
@@ -2154,6 +2165,12 @@ function wire() {
     const t = e.target;
     if (t.id === 'indexSel') { const v = t.value; S.index = Object.assign({ weights: {} }, S.index, v === 'w' ? { mode: 'w' } : { mode: 'col', col: v.slice(4) }); markDirty(); persist(); renderPlan(); }
     else if (t.dataset.weight != null) { const c = t.dataset.weight, v = t.value.trim(); S.index.weights = S.index.weights || {}; if (v === '' || isNaN(Number(v))) delete S.index.weights[c]; else S.index.weights[c] = Number(v); markDirty(); persist(); renderPlanResults(); }
+  });
+  $('meritBox').addEventListener('click', e => {
+    if (e.target.id !== 'weightsToggle') return;
+    weightsView.all = !weightsView.all; weightsView.height = ''; weightsView.scroll = 0;
+    const prev = $('weightsBox'); if (prev) prev.style.height = '';
+    renderMeritBox(); const t = $('weightsToggle'); if (t) t.focus();
   });
   $('meritBox').addEventListener('input', e => {
     if (e.target.id !== 'balance') return;
